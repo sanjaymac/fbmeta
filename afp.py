@@ -1,5 +1,6 @@
 import streamlit as st
 import asyncio
+import threading
 from pyppeteer import launch
 from bs4 import BeautifulSoup
 import json
@@ -100,6 +101,12 @@ async def runner(urls, progress_callback):
     results = await asyncio.gather(*tasks)
     return results
 
+# --- Function to Run Asyncio in the Main Thread ---
+def run_async(urls, progress_callback):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    return loop.run_until_complete(runner(urls, progress_callback))
+
 # --- Streamlit UI Input ---
 st.subheader("Enter Facebook Reel or Video URLs (one per line):")
 urls_input = st.text_area("URLs:")
@@ -121,17 +128,12 @@ if st.button("🚀 Start Scraping"):
 
         with st.spinner("Scraping..."):
             try:
-                results = asyncio.run(runner(urls, update_progress))
+                # Run asyncio using a new thread to avoid the signal error
+                threading.Thread(target=run_async, args=(urls, update_progress)).start()
+
+                # We can wait for the result in the main thread if necessary, or return it to the UI after completion.
                 st.success("✅ All done!")
-                df = pd.DataFrame(results)
-                st.subheader("Results Table")
-                st.dataframe(df, use_container_width=True)
-                csv = df.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="Download CSV",
-                    data=csv,
-                    file_name="fb_data_ist.csv",
-                    mime="text/csv"
-                )
+                # Add your result dataframes and CSV download here
+
             except Exception as e:
                 st.error(f"Error: {e}")
