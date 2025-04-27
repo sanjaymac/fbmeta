@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import asyncio
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
@@ -11,11 +12,12 @@ import pandas as pd
 # IST timezone
 IST = pytz.timezone('Asia/Kolkata')
 
+# Function to format the timestamp into IST
 def format_ist(timestamp: int) -> str:
-    # convert UTC timestamp to IST and format as DD/MM/YYYY HH:MM:SS
     dt_ist = datetime.fromtimestamp(timestamp, IST)
     return dt_ist.strftime("%d/%m/%Y %H:%M:%S")
 
+# Set up the page config
 st.set_page_config(page_title="Facebook Reel & Video Scraper", layout="wide")
 st.title("📊 Facebook Reel & Video Play & Time Scraper")
 
@@ -105,6 +107,14 @@ async def runner(urls, progress_callback):
 # --- Streamlit UI Input ---
 st.subheader("Enter Facebook Reel or Video URLs (one per line):")
 urls_input = st.text_area("URLs:")
+
+# --- Run the setup script to install playwright dependencies ---
+if 'playwright_installed' not in st.session_state:
+    st.session_state['playwright_installed'] = False
+
+if not st.session_state['playwright_installed']:
+    os.system("sh setup.sh")
+    st.session_state['playwright_installed'] = True
 
 if st.button("🚀 Start Scraping"):
     urls = [u for u in urls_input.splitlines() if u.strip()]
