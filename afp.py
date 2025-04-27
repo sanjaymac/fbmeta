@@ -1,11 +1,18 @@
 import streamlit as st
-import requests
+import asyncio
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 from bs4 import BeautifulSoup
 import json
 import re
 from datetime import datetime
 import pytz
 import pandas as pd
+import subprocess
+import os
+
+# Ensure Playwright is installed when the app runs
+if not os.path.exists('/home/appuser/.cache/ms-playwright'):
+    subprocess.run(["python3", "install_playwright.py"], check=True)
 
 # IST timezone
 IST = pytz.timezone('Asia/Kolkata')
@@ -51,38 +58,55 @@ def extract_publish_time(soup):
             continue
     return None
 
-# --- Function to get metadata from the Facebook URL ---
-def get_fb_metadata(url):
+# --- Async Reel metadata & play count extractor ---
+async def get_fb_metadata_async(browser, url):
+    page = await browser.new_page()
     try:
-        response = requests.get(url, timeout=30)
-        if response.status_code != 200:
-            return {"URL": url, "Error": f"Failed to fetch page, status code: {response.status_code}"}
+        await page.goto(url, timeout=60000)
+    except PlaywrightTimeoutError:
+        await page.close()
+        return {"URL": url, "Upload Time (IST)": None, "Publish Time (IST)": None, "Play Count": None, "Error": "Timeout"}
 
-        html = response.text
-        soup = BeautifulSoup(html, 'html.parser')
+    await page.wait_for_timeout(5000)
+    html = await page.content()
 
-        # Extract upload time via data-utime
-        upload_time = None
-        try:
-            utime = soup.find("abbr", {"data-utime"})['data-utime']
-            if utime:
-                upload_time = format_ist(int(utime))
-        except:
-            pass
+    # upload time via data-utime
+    upload_time = None
+    try:
+        utime = await page.locator("abbr[data-utime]").first.get_attribute("data-utime", timeout=3000)
+        if utime:
+            upload_time = format_ist(int(utime))
+    except:
+        pass
 
-        # Fallback: extract publish time from JSON data embedded in the page
-        publish_time = extract_publish_time(soup)
-        if not upload_time:
-            upload_time = publish_time
+    # fallback JSON for publish/create time
+    soup = BeautifulSoup(html, 'html.parser')
+    publish_time = extract_publish_time(soup)
+    if not upload_time:
+        upload_time = publish_time
 
-        # Extract play count
-        match = re.search(r'"play_count"\s*:\s*(\d+)', html)
-        play_count = int(match.group(1)) if match else None
+    # play count
+    match = re.search(r'"play_count"\s*:\s*(\d+)', html)
+    play_count = int(match.group(1)) if match else None
 
-        return {"URL": url, "Upload Time (IST)": upload_time, "Publish Time (IST)": publish_time, "Play Count": play_count}
+    await page.close()
+    return {"URL": url, "Upload Time (IST)": upload_time, "Publish Time (IST)": publish_time, "Play Count": play_count}
 
-    except Exception as e:
-        return {"URL": url, "Error": str(e)}
+# --- Runner for all URLs ---
+CONCURRENT_LIMIT = 5
+async def runner(urls, progress_callback):
+    sem = asyncio.Semaphore(CONCURRENT_LIMIT)
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        tasks = []
+        total = len(urls)
+        for url in urls:
+            task = asyncio.create_task(get_fb_metadata_async(browser, url.strip()))
+            task.add_done_callback(lambda _: progress_callback())
+            tasks.append(task)
+        results = await asyncio.gather(*tasks)
+        await browser.close()
+    return results
 
 # --- Streamlit UI Input ---
 st.subheader("Enter Facebook Reel or Video URLs (one per line):")
@@ -97,21 +121,15 @@ if st.button("🚀 Start Scraping"):
         status = st.empty()
         count = {'done': 0}
         total = len(urls)
-
         def update_progress():
             count['done'] += 1
             pct = count['done'] / total
             progress_bar.progress(pct)
             status.text(f"Scraping: {int(pct * 100)}%")
 
-        results = []
         with st.spinner("Scraping..."):
             try:
-                for url in urls:
-                    result = get_fb_metadata(url.strip())
-                    results.append(result)
-                    update_progress()
-
+                results = asyncio.run(runner(urls, update_progress))
                 st.success("✅ All done!")
                 df = pd.DataFrame(results)
                 st.subheader("Results Table")
