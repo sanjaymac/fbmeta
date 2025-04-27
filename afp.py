@@ -1,7 +1,5 @@
 import streamlit as st
-import asyncio
-import threading
-from pyppeteer import launch
+import requests
 from bs4 import BeautifulSoup
 import json
 import re
@@ -53,27 +51,25 @@ def extract_publish_time(soup):
             continue
     return None
 
-# --- Async Reel metadata & play count extractor ---
-async def get_fb_metadata_async(url):
-    browser = await launch(headless=True)
-    page = await browser.newPage()
+# --- Metadata extractor using requests ---
+def get_fb_metadata(url):
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    
     try:
-        await page.goto(url, timeout=60000)
-    except:
-        await browser.close()
-        return {"URL": url, "Upload Time (IST)": None, "Publish Time (IST)": None, "Play Count": None, "Error": "Timeout"}
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()  # Will raise an HTTPError for bad responses
+    except requests.exceptions.RequestException as e:
+        return {"URL": url, "Error": str(e)}
 
-    await page.waitFor(5000)
-    html = await page.content()
+    html = response.text
 
     # upload time via data-utime
     upload_time = None
-    try:
-        utime = await page.querySelectorEval("abbr[data-utime]", "node => node.getAttribute('data-utime')")
-        if utime:
-            upload_time = format_ist(int(utime))
-    except:
-        pass
+    match = re.search(r'itemprop="datePublished" content="(\d+)"', html)
+    if match:
+        upload_time = format_ist(int(match.group(1)))
 
     # fallback JSON for publish/create time
     soup = BeautifulSoup(html, 'html.parser')
@@ -85,28 +81,7 @@ async def get_fb_metadata_async(url):
     match = re.search(r'"play_count"\s*:\s*(\d+)', html)
     play_count = int(match.group(1)) if match else None
 
-    await browser.close()
     return {"URL": url, "Upload Time (IST)": upload_time, "Publish Time (IST)": publish_time, "Play Count": play_count}
-
-# --- Runner for all URLs ---
-CONCURRENT_LIMIT = 5
-async def runner(urls, progress_callback):
-    sem = asyncio.Semaphore(CONCURRENT_LIMIT)
-    tasks = []
-    total = len(urls)
-    for url in urls:
-        task = asyncio.create_task(get_fb_metadata_async(url.strip()))
-        task.add_done_callback(lambda _: progress_callback())
-        tasks.append(task)
-    results = await asyncio.gather(*tasks)
-    return results
-
-# --- Function to Run Asyncio in the Main Thread ---
-def run_async(urls, progress_callback):
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    results = loop.run_until_complete(runner(urls, progress_callback))
-    return results
 
 # --- Streamlit UI Input ---
 st.subheader("Enter Facebook Reel or Video URLs (one per line):")
@@ -121,7 +96,6 @@ if st.button("🚀 Start Scraping"):
         status = st.empty()
         count = {'done': 0}
         total = len(urls)
-
         def update_progress():
             count['done'] += 1
             pct = count['done'] / total
@@ -129,30 +103,23 @@ if st.button("🚀 Start Scraping"):
             status.text(f"Scraping: {int(pct * 100)}%")
 
         with st.spinner("Scraping..."):
+            results = []
             try:
-                # Run asyncio using a new thread to avoid the signal error
-                def background_scraping():
-                    results = run_async(urls, update_progress)
-                    st.session_state['scraping_results'] = results
-                    st.experimental_rerun()  # Trigger a UI refresh once done
-
-                # Start background scraping in a new thread
-                threading.Thread(target=background_scraping).start()
-
-                # Wait for the results to be populated
-                if 'scraping_results' in st.session_state:
-                    results = st.session_state['scraping_results']
-                    st.success("✅ All done!")
-                    df = pd.DataFrame(results)
-                    st.subheader("Results Table")
-                    st.dataframe(df, use_container_width=True)
-                    csv = df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label="Download CSV",
-                        data=csv,
-                        file_name="fb_data_ist.csv",
-                        mime="text/csv"
-                    )
-
+                for url in urls:
+                    result = get_fb_metadata(url.strip())
+                    results.append(result)
+                    update_progress()
+                
+                st.success("✅ All done!")
+                df = pd.DataFrame(results)
+                st.subheader("Results Table")
+                st.dataframe(df, use_container_width=True)
+                csv = df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="Download CSV",
+                    data=csv,
+                    file_name="fb_data_ist.csv",
+                    mime="text/csv"
+                )
             except Exception as e:
                 st.error(f"Error: {e}")
