@@ -1,18 +1,12 @@
 import streamlit as st
 import asyncio
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from pyppeteer import launch
 from bs4 import BeautifulSoup
 import json
 import re
 from datetime import datetime
 import pytz
 import pandas as pd
-import subprocess
-import os
-
-# Ensure Playwright is installed when the app runs
-if not os.path.exists('/home/appuser/.cache/ms-playwright'):
-    subprocess.run(["python3", "install_playwright.py"], check=True)
 
 # IST timezone
 IST = pytz.timezone('Asia/Kolkata')
@@ -59,21 +53,22 @@ def extract_publish_time(soup):
     return None
 
 # --- Async Reel metadata & play count extractor ---
-async def get_fb_metadata_async(browser, url):
-    page = await browser.new_page()
+async def get_fb_metadata_async(url):
+    browser = await launch(headless=True)
+    page = await browser.newPage()
     try:
         await page.goto(url, timeout=60000)
-    except PlaywrightTimeoutError:
-        await page.close()
+    except:
+        await browser.close()
         return {"URL": url, "Upload Time (IST)": None, "Publish Time (IST)": None, "Play Count": None, "Error": "Timeout"}
 
-    await page.wait_for_timeout(5000)
+    await page.waitFor(5000)
     html = await page.content()
 
     # upload time via data-utime
     upload_time = None
     try:
-        utime = await page.locator("abbr[data-utime]").first.get_attribute("data-utime", timeout=3000)
+        utime = await page.querySelectorEval("abbr[data-utime]", "node => node.getAttribute('data-utime')")
         if utime:
             upload_time = format_ist(int(utime))
     except:
@@ -89,23 +84,20 @@ async def get_fb_metadata_async(browser, url):
     match = re.search(r'"play_count"\s*:\s*(\d+)', html)
     play_count = int(match.group(1)) if match else None
 
-    await page.close()
+    await browser.close()
     return {"URL": url, "Upload Time (IST)": upload_time, "Publish Time (IST)": publish_time, "Play Count": play_count}
 
 # --- Runner for all URLs ---
 CONCURRENT_LIMIT = 5
 async def runner(urls, progress_callback):
     sem = asyncio.Semaphore(CONCURRENT_LIMIT)
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        tasks = []
-        total = len(urls)
-        for url in urls:
-            task = asyncio.create_task(get_fb_metadata_async(browser, url.strip()))
-            task.add_done_callback(lambda _: progress_callback())
-            tasks.append(task)
-        results = await asyncio.gather(*tasks)
-        await browser.close()
+    tasks = []
+    total = len(urls)
+    for url in urls:
+        task = asyncio.create_task(get_fb_metadata_async(url.strip()))
+        task.add_done_callback(lambda _: progress_callback())
+        tasks.append(task)
+    results = await asyncio.gather(*tasks)
     return results
 
 # --- Streamlit UI Input ---
