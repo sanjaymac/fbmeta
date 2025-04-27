@@ -105,7 +105,8 @@ async def runner(urls, progress_callback):
 def run_async(urls, progress_callback):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    return loop.run_until_complete(runner(urls, progress_callback))
+    results = loop.run_until_complete(runner(urls, progress_callback))
+    return results
 
 # --- Streamlit UI Input ---
 st.subheader("Enter Facebook Reel or Video URLs (one per line):")
@@ -120,6 +121,7 @@ if st.button("🚀 Start Scraping"):
         status = st.empty()
         count = {'done': 0}
         total = len(urls)
+
         def update_progress():
             count['done'] += 1
             pct = count['done'] / total
@@ -129,11 +131,28 @@ if st.button("🚀 Start Scraping"):
         with st.spinner("Scraping..."):
             try:
                 # Run asyncio using a new thread to avoid the signal error
-                threading.Thread(target=run_async, args=(urls, update_progress)).start()
+                def background_scraping():
+                    results = run_async(urls, update_progress)
+                    st.session_state['scraping_results'] = results
+                    st.experimental_rerun()  # Trigger a UI refresh once done
 
-                # We can wait for the result in the main thread if necessary, or return it to the UI after completion.
-                st.success("✅ All done!")
-                # Add your result dataframes and CSV download here
+                # Start background scraping in a new thread
+                threading.Thread(target=background_scraping).start()
+
+                # Wait for the results to be populated
+                if 'scraping_results' in st.session_state:
+                    results = st.session_state['scraping_results']
+                    st.success("✅ All done!")
+                    df = pd.DataFrame(results)
+                    st.subheader("Results Table")
+                    st.dataframe(df, use_container_width=True)
+                    csv = df.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label="Download CSV",
+                        data=csv,
+                        file_name="fb_data_ist.csv",
+                        mime="text/csv"
+                    )
 
             except Exception as e:
                 st.error(f"Error: {e}")
